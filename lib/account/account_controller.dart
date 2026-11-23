@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -218,20 +219,38 @@ class AccountController extends ValueNotifier<AccountState> {
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
+    final credentials = await _credentials.read();
     try {
-      _configs = await _ossRepository.loadBundledOrCached();
+      // Restore local state first. Expired OSS entries are intentionally kept:
+      // they can still provide the API and offline policy while a fresh copy
+      // is fetched in the background.
+      _configs = await _ossRepository.loadCached(includeExpired: true);
+      if (_configs.isEmpty) {
+        // A first-time user has no local state, so a bundled/remote config is
+        // required before the login page can be shown.
+        _configs = await _ossRepository.loadBundledOrCached();
+      }
       if (_configs.isEmpty) throw const FormatException('没有可用的 OSS 配置');
-      final config = _configs.first;
-      _setState(AccountState(status: AccountStatus.loading, oss: config));
-      final credentials = await _credentials.read();
+      final config = _preferredConfig(_configs, credentials?.ossId);
       if (credentials == null) {
         _setState(
           AccountState(status: AccountStatus.unauthenticated, oss: config),
         );
+        unawaited(_refreshOss());
         return;
       }
       await _loadSubscriptions(credentials.email);
-      _startOnlineRestore(_configs, credentials, config);
+      final cachedUser = await _loadCachedUser(credentials.email);
+      final canStartOffline = _offlineAllowed(config, credentials.lastOnlineAt);
+      _setState(
+        AccountState(
+          status: canStartOffline ? AccountStatus.offline : AccountStatus.loading,
+          oss: config,
+          user: cachedUser,
+          error: canStartOffline ? '正在同步最新数据……' : null,
+        ),
+      );
+      _startBackgroundSync(_configs, credentials);
     } on Object catch (error) {
       _setState(
         AccountState(status: AccountStatus.unauthenticated, error: '$error'),
@@ -239,8 +258,24 @@ class AccountController extends ValueNotifier<AccountState> {
     }
   }
 
-  void _startOnlineRestore(
-    List<OssConfig> configs,
+  OssConfig _preferredConfig(List<OssConfig> configs, String? ossId) {
+    for (final config in configs) {
+      if (config.ossId == ossId) return config;
+    }
+    return configs.first;
+  }
+
+  bool _offlineAllowed(OssConfig config, int? lastOnlineAt) {
+    return config.offline.enabled &&
+        lastOnlineAt != null &&
+        DateTime.now().difference(
+              DateTime.fromMillisecondsSinceEpoch(lastOnlineAt),
+            ) <=
+            Duration(days: config.offline.maxDays);
+  }
+
+  void _startBackgroundSync(
+    List<OssConfig> initialConfigs,
     ({
       String email,
       String password,
@@ -250,45 +285,88 @@ class AccountController extends ValueNotifier<AccountState> {
       int? lastOnlineAt,
     })
     credentials,
-    OssConfig fallback,
   ) {
     if (_onlineAttemptActive) return;
     _onlineAttemptActive = true;
-    _setState(
-      AccountState(
-        status: AccountStatus.authenticating,
-        oss: fallback,
-        remainingSeconds: 10,
-      ),
-    );
-    final attempt = _attemptAllOss(configs, credentials);
+    final refresh = _refreshOss();
     Future<void>(() async {
+      List<OssConfig>? refreshed;
       try {
-        final completed = await Future.any<bool>([
-          attempt,
-          Future<bool>.delayed(const Duration(seconds: 10), () => false),
-        ]);
-        if (!completed && state.status == AccountStatus.authenticating) {
-          _setRestoreFailure(fallback, credentials);
+        var restored = await _attemptAllOss(initialConfigs, credentials);
+        if (!restored) {
+          refreshed = await refresh;
+          if (refreshed != null) {
+            restored = await _attemptAllOss(refreshed, credentials);
+          }
+        } else {
+          refreshed = await refresh;
         }
-        final success = await attempt;
-        if (!success && state.status == AccountStatus.authenticating) {
-          _setRestoreFailure(fallback, credentials);
+        if (!restored && state.status != AccountStatus.online) {
+          _setRestoreFailure(
+            _preferredConfig(_configs, credentials.ossId),
+            credentials,
+          );
         }
-      } on Object catch (error) {
-        if (state.status == AccountStatus.authenticating) {
+      } on GvboardApiException catch (error) {
+        if (_isAuthenticationError(error)) {
+          // A refreshed OSS may point to the current account service. Give it
+          // one chance before treating the saved credentials as invalid.
+          var authError = error;
+          refreshed ??= await refresh;
+          final latest = refreshed;
+          if (latest != null) {
+            try {
+              if (await _attemptAllOss(latest, credentials)) return;
+            } on GvboardApiException catch (refreshedError) {
+              authError = refreshedError;
+            }
+          }
           _setState(
             AccountState(
               status: AccountStatus.unauthenticated,
-              oss: fallback,
-              error: '$error',
+              oss: _preferredConfig(_configs, credentials.ossId),
+              error: '$authError',
             ),
+          );
+        } else if (state.status != AccountStatus.online) {
+          _setRestoreFailure(
+            _preferredConfig(_configs, credentials.ossId),
+            credentials,
+          );
+        }
+      } on Object {
+        if (state.status != AccountStatus.online) {
+          _setRestoreFailure(
+            _preferredConfig(_configs, credentials.ossId),
+            credentials,
           );
         }
       } finally {
         _onlineAttemptActive = false;
       }
     });
+  }
+
+  Future<List<OssConfig>?> _refreshOss() async {
+    try {
+      final configs = await _ossRepository.refreshBundled();
+      _configs = configs;
+      final config = _preferredConfig(configs, state.oss?.ossId);
+      if (state.oss != config && state.status != AccountStatus.online) {
+        _setState(
+          AccountState(
+            status: state.status,
+            oss: config,
+            user: state.user,
+            error: state.error,
+            remainingSeconds: state.remainingSeconds,
+          ),
+        );
+      }
+      return configs;
+    } on Object {
+      return null;
+    }
   }
 
   void _setRestoreFailure(
@@ -315,6 +393,7 @@ class AccountController extends ValueNotifier<AccountState> {
       AccountState(
         status: offlineAllowed ? AccountStatus.offline : AccountStatus.expired,
         oss: config,
+        user: state.user,
         error: offlineAllowed
             ? '当前无法连接服务器，已进入离线模式。当前显示的是上次缓存的节点数据'
             : '登录状态已过期，请连接网络后重新登录',
@@ -347,6 +426,36 @@ class AccountController extends ValueNotifier<AccountState> {
     } on Object {
       _subscriptions = const [];
     }
+  }
+
+  Future<GvboardUserInfo?> _loadCachedUser(String email) async {
+    final preferences = await SharedPreferences.getInstance();
+    final raw = preferences.getString('gvboard.user.$email');
+    if (raw == null) return null;
+    try {
+      final json = (jsonDecode(raw) as Map).cast<String, dynamic>();
+      return GvboardUserInfo.fromJson(json);
+    } on Object {
+      await preferences.remove('gvboard.user.$email');
+      return null;
+    }
+  }
+
+  Future<void> _saveCachedUser(GvboardUserInfo user) async {
+    final email = (await _credentials.read())?.email;
+    if (email == null) return;
+    final preferences = await SharedPreferences.getInstance();
+    await preferences.setString(
+      'gvboard.user.$email',
+      jsonEncode({
+        'id': user.id,
+        'email': user.email,
+        'balance': user.balance,
+        'commission_balance': user.commissionBalance,
+        'subscription_limit': user.subscriptionLimit,
+        'created_at': user.createdAt,
+      }),
+    );
   }
 
   Future<void> _saveSubscriptions(List<GvboardSubscription> items) async {
@@ -472,6 +581,7 @@ class AccountController extends ValueNotifier<AccountState> {
           apiId: api.currentApiId,
           lastOnlineAt: DateTime.now().millisecondsSinceEpoch,
         );
+        await _saveCachedUser(user);
         _setState(
           AccountState(
             status: AccountStatus.online,
@@ -529,6 +639,7 @@ class AccountController extends ValueNotifier<AccountState> {
       apiId: api.currentApiId,
       lastOnlineAt: DateTime.now().millisecondsSinceEpoch,
     );
+    await _saveCachedUser(user);
     _setState(
       AccountState(status: AccountStatus.online, oss: config, user: user),
     );
@@ -574,6 +685,7 @@ class AccountController extends ValueNotifier<AccountState> {
       apiId: api.currentApiId,
       lastOnlineAt: DateTime.now().millisecondsSinceEpoch,
     );
+    await _saveCachedUser(user);
     _setState(
       AccountState(status: AccountStatus.online, oss: config, user: user),
     );

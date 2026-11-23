@@ -230,6 +230,7 @@ OSS 配置用于告诉客户端使用哪个网站、API、客服地址、离线�
 - `oss_url` 传给 GitHub Actions 的值会替换 `assets/oss/index.json` 中 `configs[0]` 的内容，因此它应当指向加密后的 `.oss` 文件，而不是明文 `.json`。
 - 如果使用 GitHub Pages、对象存储或 CDN 托管文件，确认匿名请求可以读取文件，并确认 CDN 不会把内容改写成 HTML。
 - 每次更新远程 OSS 文件后，不需要重新打包客户端；客户端下次启动或缓存过期时会重新获取。若要切换密钥，则必须重新打包并更新 `GVBOARD_OSS_KEY`。
+- 如果配置多个 OSS 做灾备，每份配置必须使用不同的 `oss_id`，例如 `my_client_primary` 和 `my_client_backup`。相同 `oss_id` 会造成本地缓存键冲突，后加载的配置可能覆盖先加载的配置。
 
 ## 创建和加密 OSS 文件
 
@@ -301,6 +302,47 @@ dart run tool/encrypt_oss.dart `
 - 本地/固定配置：把地址写到 `assets/oss/index.json` 的 `configs[0]`。
 
 如果要将 OSS 文件随客户端一起打包，也可以把明文文件放入 `assets/oss/` 并在 `index.json` 中使用相对路径。但这种方式不具备远程加密配置的保护能力，且每次修改都需要重新构建客户端。
+
+### 多 OSS 灾备配置
+
+如果需要配置主 OSS 和备用 OSS，建议这样写：
+
+```json
+{
+  "configs": [
+    "https://example.com/my-client-primary.oss",
+    "https://example.com/my-client-backup.oss"
+  ]
+}
+```
+
+两份配置使用不同的 `oss_id`：
+
+```json
+// 主 OSS
+"oss_id": "my_client_primary"
+```
+
+```json
+// 备用 OSS
+"oss_id": "my_client_backup"
+```
+
+这样每份配置都会有独立的本地缓存。客户端启动时优先使用 `configs` 中的第一份配置；登录或恢复连接失败时，会继续尝试其他配置。客户端记住某个 OSS 最近登录成功后，下次恢复登录会优先尝试该 OSS。
+
+不要让主 OSS 和备用 OSS 使用相同的 `oss_id`。`oss_id` 同时是本地缓存键和最近使用配置的标识，相同名称会让两份配置互相覆盖，降低灾备效果。
+
+### 客户端启动和离线缓存
+
+对于已经成功登录过的用户，客户端会先读取本地保存的 OSS、账号、用户信息和订阅缓存，尽快恢复界面；随后在后台尝试刷新远程 OSS，并使用保存的 Token 检查 API。网络请求不会阻塞本地缓存界面。
+
+- OSS 缓存未过期：立即使用，并在后台尝试更新；
+- OSS 缓存已过期：仍可作为旧配置使用，同时每次启动都会尝试获取新 OSS；
+- 远程 OSS 更新成功：校验通过后替换本地缓存；
+- 远程 OSS 或 API 更新失败：保留旧配置和业务缓存；如果 `offline.enabled` 为 `true` 且最后一次成功联网时间未超过 `offline.max_days`，进入离线模式；
+- 没有成功登录过、没有有效本地缓存，或离线期限已过：需要连接网络完成登录或恢复。
+
+因此，`cache_ttl_seconds` 表示“多久后需要刷新 OSS”，并不表示“多久后禁止使用旧 OSS”。`offline.max_days` 才是 API 无法连接时的离线使用期限。远程 OSS 恢复后，客户端会在后台采用新的配置。
 
 ## 本地构建
 
