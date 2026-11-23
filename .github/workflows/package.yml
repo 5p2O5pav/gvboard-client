@@ -1,0 +1,166 @@
+name: package clients
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Application display name
+        required: true
+        default: FlClash
+      binary_name:
+        description: Windows executable name without .exe
+        required: true
+        default: FlClash
+      application_id:
+        description: Android application ID
+        required: true
+        default: com.follow.clash
+      version:
+        description: Version name, for example 1.0.0
+        required: true
+        default: 0.9.2
+      build_number:
+        description: Android version code
+        required: true
+        default: '2026102401'
+      oss_url:
+        description: Remote OSS configuration URL
+        required: true
+        default: https://oss.161486.xyz/demo.json
+      platforms:
+        description: Build android, windows, or both
+        required: true
+        default: both
+
+env:
+  FLUTTER_VERSION: '3.47.6'
+  GO_VERSION: '1.27.1'
+  NDK_VERSION: r28c
+
+jobs:
+  android:
+    if: inputs.platforms == 'android' || inputs.platforms == 'both'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+          link-to-sdk: true
+      - name: Configure Android build
+        shell: bash
+        env:
+          CLIENT_NAME: ${{ inputs.name }}
+          CLIENT_APPLICATION_ID: ${{ inputs.application_id }}
+        run: |
+          flutter pub get
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('assets/oss/index.json')
+          data = json.loads(p.read_text())
+          data['configs'][0] = '${{ inputs.oss_url }}'
+          p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n')
+          PY
+      - name: Configure Android signing
+        shell: bash
+        env:
+          KEYSTORE: ${{ secrets.KEYSTORE }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [[ -n "$KEYSTORE" ]]; then
+            echo "$KEYSTORE" | base64 --decode > android/app/keystore.jks
+          fi
+          {
+            echo "keyAlias=$KEY_ALIAS"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyPassword=$KEY_PASSWORD"
+          } >> android/local.properties
+      - name: Generate Android launcher icons
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y imagemagick
+          for spec in 'mdpi 48' 'hdpi 72' 'xhdpi 96' 'xxhdpi 144' 'xxxhdpi 192'; do
+            set -- $spec
+            magick assets/images/icon.png -resize "${2}x${2}" -define webp:lossless=true \
+              "android/app/src/main/res/mipmap-${1}/ic_launcher.webp"
+            magick assets/images/icon.png -resize "${2}x${2}" -define webp:lossless=true \
+              "android/app/src/main/res/mipmap-${1}/ic_launcher_round.webp"
+          done
+      - name: Build Android APKs
+        env:
+          CLIENT_NAME: ${{ inputs.name }}
+          CLIENT_APPLICATION_ID: ${{ inputs.application_id }}
+        run: >-
+          flutter build apk --release --split-per-abi
+          --build-name "${{ inputs.version }}"
+          --build-number "${{ inputs.build_number }}"
+          --dart-define=CLIENT_NAME=${{ inputs.name }}
+          --dart-define=GVBOARD_OSS_KEY=${{ secrets.GVBOARD_OSS_KEY }}
+          --dart-define=GVBOARD_DEDICATED_CLIENT=true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ inputs.name }}-${{ inputs.version }}
+          path: build/app/outputs/flutter-apk/*.apk
+
+  windows:
+    if: inputs.platforms == 'windows' || inputs.platforms == 'both'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Enable long paths
+        run: git config --global core.longpaths true
+      - name: Install dependencies
+        run: flutter pub get
+      - name: Configure Windows build
+        shell: pwsh
+        run: |
+          $json = Get-Content -Raw assets/oss/index.json | ConvertFrom-Json
+          $json.configs[0] = '${{ inputs.oss_url }}'
+          $json | ConvertTo-Json -Depth 5 | Set-Content assets/oss/index.json
+      - name: Build Windows client
+        env:
+          CLIENT_NAME: ${{ inputs.name }}
+          CLIENT_BINARY_NAME: ${{ inputs.binary_name }}
+        run: >-
+          flutter build windows --release
+          --build-name "${{ inputs.version }}"
+          --build-number "${{ inputs.build_number }}"
+          --dart-define=CLIENT_NAME=${{ inputs.name }}
+          --dart-define=GVBOARD_OSS_KEY=${{ secrets.GVBOARD_OSS_KEY }}
+          --dart-define=GVBOARD_DEDICATED_CLIENT=true
+      - name: Package Windows client
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath "build/windows/${{ inputs.binary_name }}-${{ inputs.version }}-windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ inputs.name }}-${{ inputs.version }}
+          path: build/windows/${{ inputs.binary_name }}-${{ inputs.version }}-windows-x64.zip

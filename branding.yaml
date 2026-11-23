@@ -1,0 +1,8 @@
+# Values used by the manual GitHub package workflow.
+name: FlClash
+binary_name: FlClash
+application_id: com.follow.clash
+version: 0.9.2
+build_number: 2026102401
+android_icon: assets/images/icon.png
+windows_icon: windows/runner/resources/app_icon.ico

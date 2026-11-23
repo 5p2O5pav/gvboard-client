@@ -1,0 +1,6 @@
+#pragma once
+
+#define CLIENT_DISPLAY_NAME_RC "@CLIENT_DISPLAY_NAME@"
+#define CLIENT_BINARY_NAME "@BINARY_NAME@"
+
+static constexpr wchar_t kClientDisplayName[] = L"@CLIENT_DISPLAY_NAME@";
