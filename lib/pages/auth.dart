@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -90,11 +92,34 @@ class _UpdateBanner extends StatelessWidget {
   }
 }
 
-class _OfflineBanner extends StatelessWidget {
+class _OfflineBanner extends StatefulWidget {
   const _OfflineBanner();
 
   @override
+  State<_OfflineBanner> createState() => _OfflineBannerState();
+}
+
+class _OfflineBannerState extends State<_OfflineBanner> {
+  Timer? _timer;
+  bool _visible = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(const Duration(seconds: 8), () {
+      if (mounted) setState(() => _visible = true);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    if (!_visible) return const SizedBox.shrink();
     return const MaterialBanner(
       content: Text('当前无法连接服务器，已进入离线模式。当前显示的是上次缓存的节点数据'),
       leading: GlyphIcon(AppGlyphs.warning),
