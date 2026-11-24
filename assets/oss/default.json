@@ -32,6 +32,5 @@
     "oss_timeout_seconds": 8,
     "api_timeout_seconds": 10,
     "api_retry_count": 1
-  },
-  "cache_ttl_seconds": 86400
+  }
 }

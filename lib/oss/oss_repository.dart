@@ -78,17 +78,16 @@ class OssRepository {
       }
       throw const FormatException('没有可用的 OSS 配置');
     } on Object {
-      return loadCached(includeExpired: true);
+      return loadCached();
     }
   }
 
   /// Loads the last valid local configurations.
   ///
-  /// Expired configurations are still structurally valid and are useful for
-  /// starting in offline mode while a fresh remote configuration is fetched.
-  Future<List<OssConfig>> loadCached({bool includeExpired = false}) async {
+  /// Cached configurations remain usable until replaced by a valid refresh.
+  Future<List<OssConfig>> loadCached() async {
     final preferences = await SharedPreferences.getInstance();
-    return _readCached(preferences, includeExpired: includeExpired);
+    return _readCached(preferences);
   }
 
   Future<void> saveCached(List<OssConfig> configs) => _saveCache(configs);
@@ -144,7 +143,6 @@ class OssRepository {
         'api_timeout_seconds': config.network.apiTimeoutSeconds,
         'api_retry_count': config.network.apiRetryCount,
       },
-      'cache_ttl_seconds': config.cacheTtlSeconds,
     });
   }
 
@@ -162,10 +160,7 @@ class OssRepository {
     }
   }
 
-  Future<List<OssConfig>> _readCached(
-    SharedPreferences preferences, {
-    bool includeExpired = false,
-  }) async {
+  Future<List<OssConfig>> _readCached(SharedPreferences preferences) async {
     final configs = <({OssConfig config, int cachedAt})>[];
     for (final key in preferences.getKeys()) {
       if (!key.startsWith('gvboard.oss.config.')) continue;
@@ -177,14 +172,7 @@ class OssRepository {
         final cachedAt = preferences.getInt(
           'gvboard.oss.cached_at.${config.ossId}',
         );
-        if (cachedAt == null) {
-          continue;
-        }
-        final expired =
-            DateTime.now().millisecondsSinceEpoch - cachedAt >
-            config.cacheTtlSeconds * 1000;
-        if (expired && !includeExpired) continue;
-        configs.add((config: config, cachedAt: cachedAt));
+        configs.add((config: config, cachedAt: cachedAt ?? 0));
       } on Object {
         continue;
       }

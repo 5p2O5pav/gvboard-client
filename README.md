@@ -216,20 +216,19 @@ OSS 配置用于告诉客户端使用哪个网站、API、客服地址、离线�
 | `apis[].base_url` | 是 | API 根地址，不要写具体业务路径除非服务端要求。 |
 | `apis[].priority` | 是 | 优先级，数值越小通常越优先。 |
 | `customer_service` | 是 | 客服类型和地址。当前常用 `web`。 |
-| `offline.enabled` | 是 | 是否允许使用已缓存的 OSS 配置。 |
+| `offline.enabled` | 是 | API 不可用时，是否允许已登录用户进入离线模式。 |
 | `offline.max_days` | 是 | 离线允许使用的最长天数。 |
 | `client_update` | 是 | 客户端更新提示信息；不启用时各值可为空。 |
 | `network.oss_timeout_seconds` | 是 | 下载 OSS 的超时时间。 |
 | `network.api_timeout_seconds` | 是 | API 请求超时时间。 |
 | `network.api_retry_count` | 是 | API 请求失败后的重试次数。 |
-| `cache_ttl_seconds` | 是 | 本地缓存有效期，单位为秒。 |
 
 ### `index.json` 与远程地址的注意事项
 
 - 远程地址必须使用 HTTPS，并且返回内容必须是纯文本 Base64，不要返回 JSON 包装对象、HTML 错误页或带 Markdown 的内容。
 - `oss_url` 传给 GitHub Actions 的值会替换 `assets/oss/index.json` 中 `configs[0]` 的内容，因此它应当指向加密后的 `.oss` 文件，而不是明文 `.json`。
 - 如果使用 GitHub Pages、对象存储或 CDN 托管文件，确认匿名请求可以读取文件，并确认 CDN 不会把内容改写成 HTML。
-- 每次更新远程 OSS 文件后，不需要重新打包客户端；客户端下次启动或缓存过期时会重新获取。若要切换密钥，则必须重新打包并更新 `GVBOARD_OSS_KEY`。
+- 更新远程 OSS 文件后不需要重新打包客户端；客户端每次启动都会在后台尝试获取。若要切换密钥，则必须重新打包并更新 `GVBOARD_OSS_KEY`。
 - 如果配置多个 OSS 做灾备，每份配置必须使用不同的 `oss_id`，例如 `my_client_primary` 和 `my_client_backup`。相同 `oss_id` 会造成本地缓存键冲突，后加载的配置可能覆盖先加载的配置。
 
 ## 创建和加密 OSS 文件
@@ -336,13 +335,12 @@ dart run tool/encrypt_oss.dart `
 
 对于已经成功登录过的用户，客户端会先读取本地保存的 OSS、账号、用户信息和订阅缓存，尽快恢复界面；随后在后台尝试刷新远程 OSS，并使用保存的 Token 检查 API。网络请求不会阻塞本地缓存界面。
 
-- OSS 缓存未过期：立即使用，并在后台尝试更新；
-- OSS 缓存已过期：仍可作为旧配置使用，同时每次启动都会尝试获取新 OSS；
+- 本地 OSS 缓存没有过期时间：可用于启动，每次启动都会在后台尝试获取新 OSS；
 - 远程 OSS 更新成功：校验通过后替换本地缓存；
 - 远程 OSS 或 API 更新失败：保留旧配置和业务缓存；如果 `offline.enabled` 为 `true` 且最后一次成功联网时间未超过 `offline.max_days`，进入离线模式；
 - 没有成功登录过、没有有效本地缓存，或离线期限已过：需要连接网络完成登录或恢复。
 
-因此，`cache_ttl_seconds` 表示“多久后需要刷新 OSS”，并不表示“多久后禁止使用旧 OSS”。`offline.max_days` 才是 API 无法连接时的离线使用期限。远程 OSS 恢复后，客户端会在后台采用新的配置。
+`offline.max_days` 是 API 无法连接时的离线使用期限；OSS 缓存不会因为时间过长而失效。旧版 OSS 文件中的 `cache_ttl_seconds` 字段会被忽略，可以删除。后台刷新在每次启动时执行，运行期间不会按固定间隔自动刷新。
 
 ## 本地构建
 
@@ -393,7 +391,7 @@ flutter build apk --release --split-per-abi \
 
 ### OSS 修改后客户端没有立即变化
 
-客户端会缓存成功加载的配置，缓存时间由 `cache_ttl_seconds` 控制。可以等待缓存过期、清除应用数据，或提高 `oss_id` 让客户端使用一个新的缓存键。修改 `oss_id` 后必须确保 API 和其他字段都完整有效。
+客户端每次启动会在后台尝试刷新 OSS。请确认远程文件已更新、地址可访问且加密密钥正确，然后重新启动客户端；后台请求失败时会保留旧配置。不同 OSS 应使用不同的 `oss_id`，不要依靠修改 ID 强制刷新缓存。
 
 ### 远程 OSS 加载失败
 

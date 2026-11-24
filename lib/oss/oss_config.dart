@@ -118,7 +118,6 @@ class OssConfig {
     required this.offline,
     required this.clientUpdate,
     required this.network,
-    this.cacheTtlSeconds = 86400,
     this.websiteUrl = '',
   });
 
@@ -130,7 +129,6 @@ class OssConfig {
   final OssOfflinePolicy offline;
   final OssClientUpdate clientUpdate;
   final OssNetworkPolicy network;
-  final int cacheTtlSeconds;
   final String websiteUrl;
 
   String get officialWebsite {
@@ -160,9 +158,6 @@ class OssConfig {
     }
     if (offline.maxDays < 0 || offline.maxDays > 3650) {
       throw const FormatException('OSS 离线有效期无效');
-    }
-    if (cacheTtlSeconds < 60 || cacheTtlSeconds > 31 * 86400) {
-      throw const FormatException('OSS 缓存过期时间必须在 60 秒到 31 天之间');
     }
   }
 
@@ -194,7 +189,6 @@ class OssConfig {
       network: OssNetworkPolicy.fromJson(
         (json['network'] as Map?)?.cast<String, dynamic>() ?? const {},
       ),
-      cacheTtlSeconds: (json['cache_ttl_seconds'] as num?)?.toInt() ?? 86400,
       websiteUrl: json['website_url'] as String? ?? '',
     );
   }

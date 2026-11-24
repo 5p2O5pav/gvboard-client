@@ -221,10 +221,8 @@ class AccountController extends ValueNotifier<AccountState> {
     _initialized = true;
     final credentials = await _credentials.read();
     try {
-      // Restore local state first. Expired OSS entries are intentionally kept:
-      // they can still provide the API and offline policy while a fresh copy
-      // is fetched in the background.
-      _configs = await _ossRepository.loadCached(includeExpired: true);
+      // Restore local state first while refreshing OSS in the background.
+      _configs = await _ossRepository.loadCached();
       if (_configs.isEmpty) {
         // A first-time user has no local state, so a bundled/remote config is
         // required before the login page can be shown.
